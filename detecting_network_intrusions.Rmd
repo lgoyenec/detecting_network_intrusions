@@ -1,0 +1,437 @@
+---
+title : "Final Project"
+author: "Miner Scales"
+date  : "May 08, 2017"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    theme: cerulean
+    highlight: tango
+---
+
+```{r package_load, warning = F, message = F}
+
+library(ggplot2)     ; library(ISLR)       ; library(dplyr)  ; library(papeR)
+library(knitr)       ; library(kableExtra) ; library(plotly) ; library(ggcorrplot)
+library(glmnet)      ; library(caret)      ; library(klaR)   ; library(MASS)
+library(fastDummies) ;library(tree)        ; library(rpart)  ; library(partykit) 
+library(rpart)       ; library(rpart.plot) ; library(party)  ; library(randomForest)
+library(gbm)         ; library(pROC)       ;library(ROCR)    ; library(caret)
+library(naivebayes)
+
+cbPalette = c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+```{r global_options, include = F}
+knitr::opts_chunk$set(fig.width = 10, fig.height = 6, fig.path = 'Figs/', warning = F, message = F)
+```
+
+##### 1. Exploration
+#### 1.1 Import
+```{r}
+# Import and save data
+ # cd = "../../../MiniIV/95791DataMining/FinalProject" 
+#  setwd(cd)
+  data = read.csv("network_traffic.csv", header = T)
+```
+
+#### 1.2 Processing 
+```{r}
+# Recoding and general changes
+  data$is_intrusion[data$is_intrusion == "0="]      = 0
+  data$is_intrusion                                 = factor(data$is_intrusion)
+  data$num_compromised[data$num_compromised == 884] = NA
+  data$num_root[data$num_root == 975]               = NA
+  data.temp                                         = data  
+  data.val                                          = data
+  
+  data  = fastDummies::dummy_cols(data, remove_first_dummy = T, select_columns = c("service","flag"))
+  data  = data[,-which(names(data) %in% c("service","flag"))]
+  data  = data[,-nearZeroVar(data, uniqueCut = 0.05)]
+  
+# Index to randomly select 40% of the data to be held out for model validation
+  test.idx  = sample(1:nrow(data), round(0.4*nrow(data)))  
+  
+# Pull relevant covariates the outcome
+  data.train = data[-test.idx,]
+  data.test  = data[test.idx,]  
+
+# Upsample the data to artifically overcome sample imbalance
+  set.seed(531)
+  data.idx    = sample(which(data.train$is_intrusion == 1), 2000, replace = T)
+  data.train  = rbind(data.train, data.train[data.idx,])
+
+# Data types changes for descriptive analysis
+  data.temp$protocol_type2 = as.numeric(data.temp$protocol_type)
+  data.temp$service2       = as.numeric(data.temp$service)
+  data.temp$flag2          = as.numeric(data.temp$flag)
+  data.temp$is_intrusion2  = as.numeric(data.temp$is_intrusion)
+  data.temp                = data.temp[sapply(data.temp,is.numeric)]
+  
+# Unsupervised methods data 
+  data.clust = data.temp[data.temp$is_intrusion2 == 2,]
+  data.clust = data.temp[,-nearZeroVar(data.clust, uniqueCut = 0.05)]
+  data.anom  = data.temp[,-which(names(data.temp) %in% c("is_intrusion2"))]
+  
+```
+
+- **The factor variables were transformed to numeric in order to analyze their correlations with other variables**
+- **Some variables were recoded, i.e. variable `is_intrusion` has a value `+0` which was replaced by $0$**
+- **We ramdomly selected 40% to serve as the test set and then upsampled the remaining 60% to balance the is_intrusion feature for the supervised models**
+
+#### 1.3 Descriptive Statistics:  
+##### 1.3.1 Dimensions and class
+```{r}
+# Dimension
+  dim(data) ; ncol(data) ; nrow(data)
+# Class 
+  kable(as.matrix(sapply(data, class))) %>% kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+- **The dataset presents 3000 sessions of a logged network activity. It includes 23 features**
+- **Our variable of interest is `is.intrusion`**
+- **Most of the variables are numeric, with the exception of `protocol_type`, `service`, `flag` and `is.intrusion` that are factors**
+- **From the data, we observe different data types:**
+- *Continuous / categorical variables: `duration`,`src_bytes`,`dst_bytes`,`num_compromised`,`num_root`*
+- *Dummy / Binary variables: `logged_in`,`root_shell`,`su_attempted`, `num_file_creations`, `num_shells`, `is_guest_login`*
+- *All-zero variables: `land`,`wrong_fragment`,`urgent`,`num_failed_logins`,`num_outbound_cmds`,`is_host_login`*
+
+##### 1.3.2 Summary 
+```{r, messages = F, warnings = F}
+kable(summarize(data)) %>% kable_styling(bootstrap_options = "striped", full_width = F)
+cor.tab = cor(data.temp)
+ggcorrplot(cor.tab, type = "upper", outline.col = "white",  ggtheme = ggplot2::theme_gray, colors = c("#6D9EC1", "white", "#E46726")) +
+  theme(axis.text.x = element_text(size = rel(0.9), angle = 90), axis.text.y = element_text(size = rel(0.9)))
+```
+- **Summary statistics of all features in our dataset show that many features have zero variability. We assume these can be dropped for classification purposes. We also see highly variable features in duration, src_bytes, dst_bytes, hot, service, flag, and protocol_type, and we assume these will be valuable predictors for classifying intrusions.**
+- **From a graph displaying correlation between variables, we see that num_access_files & su_attempted/root_shell, is_guest_login/hot, is_intrusion/src_bytes, and protocol_type/logged_in are highly correlated.**
+
+#### 1.3.3. Exploratory Visualization
+```{r, messages = F, warnings = F}
+require(gridExtra)
+grid.arrange(ggplot(data, aes(x = is_intrusion)) + geom_bar(fill = I(cbPalette[6]), width = 0.3), 
+             ggplot(data, aes(x = protocol_type)) + geom_bar(aes(fill = is_intrusion), position = position_dodge()), nrow = 1, ncol = 2)
+```
+- **Exploratory visualization indicates that we can distinguish between intrusions and benign logins.**
+
+#### 3. Identifying different types of intrusion
+##### 3.1 Descriptive analysis 
+```{r, messages = F, warnings = F}
+plot1 = xyplot(service ~ protocol_type, group = is_intrusion, data = data.val, auto.key = list(space = "right"), scales=list(cex = 0.5), xlab = list(cex = 0.7), ylab = list(cex = 0.7),jitter.x=TRUE, jitter.y=TRUE,par.settings = list(superpose.symbol = list(col = c("blue","green", "red"),pch =19)))
+
+plot2 = xyplot(protocol_type ~ flag, group=is_intrusion, data = data.val, auto.key=list(space="right"), scales=list(cex = 0.5), xlab = list(cex = 0.7), ylab = list(cex = 0.7),jitter.x=TRUE, jitter.y=TRUE,par.settings = list(superpose.symbol = list(col = c("blue","green", "red"),pch =19)))
+
+plot3 = xyplot(service ~ flag, group=is_intrusion, data = data.val, auto.key=list(space="right"), scales=list(cex = 0.5), xlab = list(cex = 0.7), ylab = list(cex = 0.7), jitter.x=TRUE, jitter.y=TRUE,par.settings = list(superpose.symbol = list(col = c("blue","green", "red"),pch =19)))
+
+grid.arrange(plot1, plot2, plot3, nrow = 2, ncol = 2)
+```
+- **Furthermore, we can see indications of different types of intrusions as determined by specific combinations of flag, protocol type, and service.**
+
+##### 3.2 Classification trees
+```{r, messages = F, warnings = F}
+tree.fit  = tree::tree(is_intrusion ~ ., data = data)
+plot(tree.fit)
+text(tree.fit, pretty = 0, cex = 0.8)
+```
+- **We fit an initial tree on the entire dataset to identify important features in classification of benign logins and intrusions. From this initial visualization, it is clear that there are different types of intrusions. This finding coincides with the exploratory graphs above. We will explore this further with clustering. We found the following types of intrusions:**
+- *Intrusion 1: duration > 276.5 and a protocol_type equal to tcp*
+- *Intrusion 2: duration < 276.5, src_bytes < 107, service type different from domain_u and flag equal to S0*
+- *Intrusion 3: duration < 276.5, src_bytes < 107, service type different from domain_u,flag equal to S0 and src_bytes < 14*
+
+##### 3.3 K-means and Hierarchical clustering
+```{r, messages = F, warnings = F}
+# Prepare data to only include intrusions. scale by std dev
+  data.clust = as.data.frame(scale(data.clust))   
+
+# Hierarchical clustering with all types of linkage
+  hc.complete = hclust(dist(data.clust), method = "complete")
+  hc.average  = hclust(dist(data.clust), method = "average")
+  hc.single   = hclust(dist(data.clust), method = "single")
+
+# Plot results
+# It looks like cuts creating 4 and 5 clusters are the best options. Test options below
+  par(mfrow = c(1,3))
+  plot(hc.complete, main = "Complete", cex = .9)
+  plot(hc.average, main = "Average", cex = .9)
+  plot(hc.single, main = "Single", cex = .9)
+
+# Compare within-cluster variation across a sequence of k
+# From hierarchical clustering, we determined we need at least 3 clusters
+# From the plot, k = 7 looks like the best choice, and it matches https://www.calyptix.com/top-threats/top-7-network-attack-types-2016/
+  withinss = c()
+  for (i in 1:15) {
+    km.out   = kmeans(na.omit(data.clust), i, nstart = 20)
+    withinss = rbind(withinss, km.out$tot.withinss) 
+  }
+  
+  par(mfrow=c(1,1))
+  plot(1:15, withinss, xlab = "k", ylab = "within SS", main = "Within Cluster Variation vs. K")
+
+# Best model K = 7
+  
+  k = 7
+  km.out7 = kmeans(na.omit(data.clust), k, nstart = 20)
+
+# Plots of various measures colored by cluster, for k = 7
+  data.clust0 = data.temp[data.temp$is_intrusion2 == 2, ]   # unscaled version
+  
+  par(mfrow = c(2,2))
+  
+  plot(x = data.clust0$protocol_type2, y = data.clust0$src_bytes, col = (km.out7$cluster), xlab = "protocol type", ylab = "src bytes")
+  plot(x = data.clust0$duration,y = data.clust0$src_bytes, col = (km.out7$cluster), xlab = "duration", ylab = "src bytes")
+  plot(x = data.clust0$duration, y = data.clust0$dst_bytes, col = (km.out7$cluster), xlab = "duration", ylab = "dst bytes")
+  plot(x = data.clust0$hot, y = data.clust0$src_bytes, col = (km.out7$cluster), xlab = "hot", ylab = "src bytes")
+```
+
+- **To see if there was a way to distinguish between types of intrusions, we first created hiearchical clustering dendrograms for a visual judge of similarity between different intrusion observations. We then used the within-sum-of-squares value for different values of k in the k-means algorithm to find the best value of k. We chose a value of k = 7, which corresponds to the number of most common types of network intrusions according to https://www.calyptix.com/top-threats/top-7-network-attack-types-2016/**
+- **The graphs show  that intrusions vary by value of protocol type, duration, src_bytes, and hot.**
+
+#### 4. System for detecting intrusions
+##### Classification models: Cross Validation
+```{r, messages = F, warnings = F}
+# Naive Bayes 
+# Fit and cross validate Naive Bayes method
+  set.seed(2)
+  my_data3    = data.train[-1,]
+  my_data3    = na.omit(my_data3)
+  model.nb.cv = train(is_intrusion~., my_data3, method = "naive_bayes", trControl = trainControl(method = "cv",number = 10,verboseIter = T))
+  
+# Set parameter usekernel = F as it performs better in the cross validation routine
+  model.nb      = naive_bayes(is_intrusion~., data = my_data3, userkernel = F, laplace = 0, adjust = 1)
+
+# Logistic Regression
+  model.logic    = glm(is_intrusion~., data = my_data3, family = "binomial")
+  train_control  = trainControl(method = "cv", number = 10)
+  model.logic.cv = train(is_intrusion ~ .,data =my_data3 ,trControl = train_control,method = "glm",family = binomial())
+
+# Lasso Logit 
+# Train data
+  xfactors  = model.matrix(is_intrusion~.,data = my_data3)[,-1]
+  my_data3x = as.matrix(data.frame(xfactors))
+
+# Fit lasso logit. Use cross validation to find 1-SE lambda
+  glmod     = glmnet(x = my_data3x, y = my_data3$is_intrusion, alpha = 1, family = "binomial")
+  cv.glmod  = cv.glmnet(x= my_data3x, y = my_data3$is_intrusion, alpha = 1, family = "binomial" )
+  
+  par(mfrow = c(1,2))
+  plot(glmod,xvar="lambda")
+  plot(cv.glmod)
+  
+# Lambda
+  lambda.SE        = cv.glmod$lambda.1se
+  lasso.logtrain   = predict(cv.glmod, newx = my_data3x, s = lambda.SE)
+  lasso.prob.train = plogis(lasso.logtrain)
+  
+# Determining best threshold to maximize sensitivity
+  pred3 = prediction(lasso.prob.train, my_data3$is_intrusion)
+  perf4 = performance(prediction.obj = pred3,"tpr","fpr" )
+  perf5 = performance(prediction.obj = pred3,"sens","spec")
+  
+  cutoffs2 = data.frame(cut=perf4@alpha.values[[1]], fpr=perf4@x.values[[1]], tpr=perf4@y.values[[1]])
+  cutoffs2 = cutoffs2[order(cutoffs2$tpr, decreasing=TRUE),]
+  best.cut = head(cutoffs2)
+  
+  lasso.best2 = as.data.frame(ifelse(lasso.prob.train>best.cut[1,1],1,0))
+  names(lasso.best2)[1] ="pred"
+  
+# Classification trees
+  fit.control3 = trainControl(method = "cv", number = 10, search = "grid")
+  tune.dt.grid = train(is_intrusion ~., data = na.omit(data.train), method = "rpart", metric = "Accuracy", trControl = fit.control3)
+  plot(tune.dt.grid)
+
+# Pruned Classification trees
+  fit.control4    = trainControl(method = "cv", number = 10, search = "grid")
+  tune.prune.grid = train(is_intrusion ~., data = na.omit(data.train), method = "rpart1SE", metric = "Accuracy", trControl = fit.control4)
+  
+# Random Forests 
+# Tuning model using grid search approach
+  fit.control2 = trainControl(method = "cv", number = 10, search = "grid")
+  tunegrid2    = expand.grid(.mtry= c(1:15))
+  tune.rf.grid = train(is_intrusion ~., data = na.omit(data.train), method = "rf", metric = "Accuracy", tuneGrid = tunegrid2, trControl = fit.control2)
+  plot(tune.rf.grid)
+  
+```
+
+- **Naive Bayes: has a very low accuracy of 28% on the test data. A large number of the errors are concentrated in the False Negative, which is particularly bad for the bank.**
+= **Logistic Regression: has an accuracy of 93.7% on the test data. False Negatives account for 74 errors, which is bad for the bank.**
+- **Lasso logit: Logistic Lasso shows an accuracy of 91% on the test data, which is slightly lower than the tree methods above. However, False Negatives account for 107 of the errors, which is concerning for the bank.We use cross validation to pick the best lambda parameter.**
+- **Classification trees: We first fit a normal classification tree and see that it performs well with accuracy of 94%. We are particularly concerned about False Negative (FN) (not predicting intrusion whereas there is one) because failing to identify an intrusion is costly for a bank. In Classification Tree FN = 0. We have then grown a large tree and pruned it based on 1-se rule with respect to min CP. Performance of pruned tree is slightly better than Classification Tree with accuracy of 94.75% with FN = 1. We will see how mis-classification of even one intrusion case can impact bank financially.**
+**Random Forests: We have now built a random forest and see that its performs equally well with accuracy of 94% and FN = 0 on the test data.**
+
+#### 5. Detection power of system
+##### 5.1 Accuracy Assessment
+```{r, messages = F, warnings = F}
+# Naive Bayes
+  model.nb.test = predict(model.nb, data.test, type = "class")
+  cm.nb         = confusionMatrix(as.factor(data.test$is_intrusion),as.factor(model.nb.test))
+  
+# Logistic Regression
+  logic.test = predict(model.logic,data.test, type = "response")
+  logic.test = as.data.frame(ifelse(logic.test>0.5,1,0))
+  names(logic.test)[1] = "pred"
+  cm.logit   = confusionMatrix(as.factor(data.test$is_intrusion),as.factor(logic.test$pred))
+
+# Lasso Logit 
+# Test data
+  xfactors2 = model.matrix(is_intrusion~.,data = data.test)[,-1]
+  covars2   = as.matrix(data.frame(xfactors2))
+  
+# Predict using lasso
+  lasso.logtest   = predict(cv.glmod, newx = covars2,s = lambda.SE)
+  lasso.prob.test = plogis(lasso.logtest)
+  lasso.best3     = as.data.frame(ifelse(lasso.prob.test>best.cut[1,1],1,0))
+  names(lasso.best3)[1] = "pred"
+  my_dataZ              = na.omit(data.test)
+  con.of.lasso    = confusionMatrix(as.factor(my_dataZ$is_intrusion),as.factor(lasso.best3$pred))
+
+# Classification trees
+  tune.dt.pred = predict(tune.dt.grid, newdata = na.omit(data.test), type = "raw")
+  cm.trees     = confusionMatrix(tune.dt.pred, data.test$is_intrusion)
+  
+# Pruned Classficiation trees
+  tune.prune.pred = predict(tune.prune.grid, newdata = data.test, type = "raw")
+  cm.prune        = confusionMatrix(tune.prune.pred, data.test$is_intrusion)
+
+# Random Forests 
+  tune.rf.pred = predict(tune.rf.grid, newdata = data.test, type = "raw")
+  cm.rf        = confusionMatrix(tune.rf.pred, data.test$is_intrusion)
+  
+# Accuracy comparison from CV 
+  aux.lasso    = as.data.frame(con.of.lasso$overall[1])
+  accuracy.val = c()
+  models       = c("Naive Bayes","Logit regression","Lasso Logit", "Unpruned Overall Tree", "Pruned Tree", "Random Forest")
+
+  lasso.log.acc    = as.data.frame(con.of.lasso$overall[1])
+  
+  cv.rf    = as.data.frame(tune.rf.grid$results["Accuracy"])[15,1]
+  cv.trees = as.data.frame(tune.dt.grid$results)[1,2]
+  cv.prune = tune.prune.grid$results["Accuracy"]
+  
+  accuracy.val = append(accuracy.val,round(model.nb.cv$results$Accuracy[1],2))
+  accuracy.val = append(accuracy.val,round(model.logic.cv$results$Accuracy,2))
+  accuracy.val = append(accuracy.val,round(aux.lasso$`con.of.lasso$overall[1]`,2))
+  accuracy.val = append(accuracy.val,round(cv.trees,2))
+  accuracy.val = append(accuracy.val,round(cv.prune,2))
+  accuracy.val = append(accuracy.val,round(cv.rf,2))
+  
+  CV.accuracy  = setNames(as.list(accuracy.val), models)
+  CV.accuracy
+```
+- **Random Forests corresponds to the best model, it has the highest accuracy**
+
+##### 5.2 XYZ Bank Costs
+**Define a cost metric assuming that each false negative (unidentified intrusion) costs the bank $10K and each false positive (benign log in classified as intrusion) costs the bank $100 USD for investigating that intrusion. Normalize the metric per session**
+```{r, messages = F, warnings = F}
+cost.intrusion     = 10000000
+cost.investigation = 100
+
+cbind(models,
+      as.numeric(round(rbind(
+  (cm.nb$table[1,2]*cost.intrusion + cm.nb$table[2,1]*cost.investigation)/nrow(data.test),
+  (cm.logit$table[1,2]*cost.intrusion + cm.logit$table[2,1]*cost.investigation)/nrow(data.test),
+  (con.of.lasso$table[1,2]*cost.intrusion + con.of.lasso$table[2,1]*cost.investigation)/nrow(data.test),
+  (cm.trees$table[1,2]*cost.intrusion + cm.trees$table[2,1]*cost.investigation)/nrow(data.test),
+  (cm.prune$table[1,2]*cost.intrusion + cm.prune$table[2,1]*cost.investigation)/nrow(data.test),
+  (cm.rf$table[1,2]*cost.intrusion + cm.rf$table[2,1]*cost.investigation)/nrow(data.test)),2)))
+
+```
+- **Based on the defined metric, we find that the random forest minimizes the expected cost per session. This cost is $3.83/session.**
+
+#### 6. Unsupervised Learning: Is there a potentially anomaly? 
+```{r, messages = F, warnings = F}
+# Establishing number of clusters
+  set.seed(579)
+  data.atom = as.data.frame(scale(data.anom))
+  km.ss = c()
+  for (i in 1:15) {
+    km.out = kmeans(na.omit(data.anom), i, nstart = 20)
+    km.ss  = rbind(km.ss, km.out$tot.withinss)
+  }
+
+  plot(1:15, km.ss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares")
+
+# Best cluster k = 4
+  k        = 4
+  km.out   = kmeans(na.omit(data.anom), k, nstart = 20)
+  centroid = km.out$centers
+  
+  v.centroid = c()
+
+# Radius: centroid to furthest data point in each cluster    
+  for(i in 1:k){
+    n      = nrow(data.anom[km.out$cluster == i,])
+    d.data = data.anom[km.out$cluster == i,]
+    d.ref  = centroid[i]
+    d.temp = c()
+    for(j in 1:n){
+      dist   = dist(rbind(d.data[j,],d.ref), method = "euclidian")
+      d.temp = rbind(d.temp, dist)
+    }
+    v.centroid = c(v.centroid,max(d.temp))
+  }
+  epsilon    = 1.001
+  v.centroid = v.centroid*epsilon 
+  
+# Anomaly Detection function  
+  anomalyDetection <- function(data){
+    anomalyT = c()
+    for(j in 1:nrow(data)){
+      test = data[j,]
+      t.centroid = c()
+      for(i in 1:k){
+        dist       = dist(rbind(test,centroid[i]), method = "euclidian")
+        t.centroid = rbind(t.centroid, dist) 
+      }
+      if((max(v.centroid)-max(t.centroid)) < 0){
+        anomalyT = rbind(anomalyT,"Potentially Anomaly")
+      } else {
+        anomalyT = rbind(anomalyT,"Normal Login")
+      }
+    }
+    summary(anomalyT)
+  }
+
+# Testing the anomalyDetection function
+# data.anom: all variables should be 100% classfied as 'Normal Login'
+  anomalyDetection(data.anom)
+
+# fake A data: all nearZeroVar variables are transformed
+  fakeA = data.anom
+  
+  fakeA$land              = sample(c(0,1,1,1),nrow(fakeA),replace = T)
+  fakeA$wrong_fragment    = abs(rnorm(nrow(fakeA),80000,150000))
+  fakeA$urgent            = abs(rnorm(nrow(fakeA),10000,90000))
+  fakeA$num_outbound_cmds = abs(rnorm(nrow(fakeA),1000,22000))
+  fakeA$is_host_login     = sample(c(0,1,1,1),nrow(fakeA),replace = T)
+  
+  anomalyDetection(fakeA)
+
+# fake B data: change distribution of duration, flag and src_bytes
+  fakeB = data.anom
+
+  fakeB$duration  = abs(rnorm(nrow(fakeB),300, 2000))
+  fakeB$src_bytes = abs(rnorm(nrow(fakeB),8000,600000))
+  fakeB$flag2     = sample(c(1,2,2,2,3,3,4,4,5,5,5,5,6),nrow(fakeB),replace = T)
+  
+  anomalyDetection(fakeB)
+
+```
+
+- **For anomaly detection, we first used an unsupervised learning method to cluster the raw data. We determined the best number of clusters by comparing the within-sum-of-squares metric for different values of k. Using k = 4, we found the centroid for each cluster and the distance from each cluster centroid to the furthest observation within that cluster.**
+- **This maximum distance plus a buffer epsilon serve as a threshold for anomaly detection. For each data, our function calculates the distance to each cluster centroid. If this distance is greater than the threshold, the observation is classified as an anomaly.**
+- **We tested our fucntion three times: once with our original dataset (as a baseline case to ensure an anomaly detection rate of 0%), once with mutated values for all features with zero variability, and once with mutated values for variable features correlated with the is_intrusion response. For the features with zero variability, it was necessary to change the values by a very large multiplier in order for these observations to be classified as anamolies. For the variable features correlated with the response, we only had to generate new values using a normal distribution with twice the original mean and twice the original standard deviation. **
+
+
+
+
+
+
+
+
+
+
+
+
+
+
